@@ -1,0 +1,16 @@
+[package]
+name = "example-native"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "example_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pin a Beacon release tag here. The tag fixes the DataFusion version.
+beacon-plugin-sdk = { git = "https://github.com/maris-development/beacon", branch = "main" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

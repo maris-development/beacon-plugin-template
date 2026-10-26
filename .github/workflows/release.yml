@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the manifest
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_ENV"
+          import os, sys, tomllib
+          m = tomllib.load(open("beacon-plugin.toml", "rb"))
+          version = m["plugin"]["version"]
+          if os.environ["GITHUB_REF_NAME"] != f"v{version}":
+              sys.exit(f"tag {os.environ['GITHUB_REF_NAME']} does not match plugin.version {version}")
+          native = m.get("native")
+          print(f"PLUGIN_NATIVE={'true' if native else 'false'}")
+          if native:
+              print(f"PLUGIN_CRATE={native['crate']}")
+              print(f"PLUGIN_LIBRARY={native['library']}")
+          EOF
+
+      - name: Update Rust
+        if: ${{ env.PLUGIN_NATIVE == 'true' }}
+        run: rustup update stable --no-self-update
+
+      - name: Cache Rust builds
+        if: ${{ env.PLUGIN_NATIVE == 'true' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.PLUGIN_CRATE }}
+
+      - name: Build the native library
+        if: ${{ env.PLUGIN_NATIVE == 'true' }}
+        run: cargo build --release --locked --manifest-path "$PLUGIN_CRATE/Cargo.toml"
+
+      - name: Package the plugin
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(--out dist)
+          if [ "$PLUGIN_NATIVE" = "true" ]; then
+            args+=(--library "$PLUGIN_CRATE/target/release/lib$PLUGIN_LIBRARY.so" --target "$TARGET")
+          fi
+          python3 scripts/package-plugin.py . "${args[@]}"
+
+      - name: Keep the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+
+      # Each build job writes its own SHA256SUMS, so write one file for all archives.
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
