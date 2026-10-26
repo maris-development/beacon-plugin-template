@@ -17,12 +17,13 @@ Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the ful
 | `scripts/package-plugin.py` | Packs the plugin into an archive and writes `SHA256SUMS`. |
 | `.github/workflows/release.yml` | Builds and packs the plugin for a tag. Attaches the archives to the GitHub release. |
 
-The example plugin `example` has three functions:
+The example plugin `example` has four functions:
 
 | Function | Type | Result |
 | --- | --- | --- |
 | `example_add_one(x)`, alias `example_inc(x)` | Native, closure helper | `x + 1` |
 | `example_hypot(x, y)` | Native, `ScalarUDFImpl` | `sqrt(x² + y²)` |
+| `example_in_box(lon, lat, min_lon, min_lat, max_lon, max_lat)` | Native, closure helper with a planner hook | `true` when the point is in the box |
 | `example_add_two(x)` | SQL | `x + 2` |
 
 ## Use the template
@@ -60,6 +61,27 @@ Make `plugin.beacon` in `beacon-plugin.toml` match the Beacon versions of that D
 
 Use the `datafusion` crate that the SDK re-exports. Do not add `datafusion` as a dependency.
 Keep `panic = "unwind"`. This is the default. The SDK refuses `panic = "abort"`.
+
+## Add planner hooks
+
+DataFusion cannot see into a plugin function. So a filter on the function prunes no files.
+A planner hook tells Beacon what a call means. All hooks are optional.
+
+| Builder method | Use |
+| --- | --- |
+| `implies(f)` | A plain predicate that the call implies. |
+| `bounds(f)` | The output interval for the argument intervals. |
+| `propagate(f)` | The argument intervals for an output interval. |
+
+`example_in_box` uses `implies`. The filter `example_in_box(lon, lat, 2, 50, 8, 56)` implies
+`lon BETWEEN 2 AND 8 AND lat BETWEEN 50 AND 56`. Beacon uses that predicate to prune files.
+
+- `Implied::Necessary(expr)`: Beacon adds `expr` next to the call. The rule must be correct. Else rows disappear from the result.
+- `Implied::Exact(expr)`: Beacon replaces the call with `expr`.
+- A hook that gives `Ok(None)`, an error or a panic gives no answer. The query does not fail.
+- For a `ScalarUDFImpl`, implement `FunctionHooks` and wrap the function with `HookedUdf::new`.
+
+The SDK README in the Beacon repository has more detail.
 
 ## Run the unit tests
 
