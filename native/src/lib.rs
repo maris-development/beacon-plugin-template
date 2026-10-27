@@ -1,4 +1,4 @@
-//! Example Beacon plugin with three native scalar functions.
+//! Example Beacon plugin with three native scalar functions, two of them with planner hooks.
 
 use std::sync::Arc;
 
@@ -6,18 +6,35 @@ use beacon_plugin_sdk::datafusion::arrow::array::{Array, ArrayRef, BooleanArray,
 use beacon_plugin_sdk::datafusion::arrow::compute::binary;
 use beacon_plugin_sdk::datafusion::arrow::datatypes::DataType;
 use beacon_plugin_sdk::datafusion::common::cast::as_float64_array;
-use beacon_plugin_sdk::datafusion::common::{Result, exec_err};
+use beacon_plugin_sdk::datafusion::common::{Result, ScalarValue, exec_err};
+use beacon_plugin_sdk::datafusion::logical_expr::interval_arithmetic::Interval;
 use beacon_plugin_sdk::datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use beacon_plugin_sdk::scalar_functions::{Implied, function};
 
+/// The interval that holds only `1.0`.
+fn one() -> Result<Interval> {
+    let one = ScalarValue::Float64(Some(1.0));
+    Interval::try_new(one.clone(), one)
+}
+
 /// `example_add_one(x)` returns `x + 1`. It uses the closure helper of the SDK.
+///
+/// The `bounds` and `propagate` hooks let Beacon turn a range on the result into a range on `x`.
 fn add_one() -> ScalarUDF {
     function("example_add_one")
         .args([DataType::Float64])
         .returns(DataType::Float64)
         .alias("example_inc")
+        .bounds(|args| Ok(Some(args[0].add(one()?)?)))
+        .propagate(|output, args| {
+            // An empty intersection means no row matches. No answer is always correct.
+            let Some(x) = args[0].intersect(output.sub(one()?)?)? else {
+                return Ok(None);
+            };
+            Ok(Some(vec![x]))
+        })
         .invoke_arrays(|arrays| {
             let Some(values) = arrays[0].as_any().downcast_ref::<Float64Array>() else {
                 return exec_err!("example_add_one expects a Float64 argument");
@@ -109,11 +126,13 @@ beacon_plugin_sdk::export_plugin!(scalar = functions);
 
 #[cfg(test)]
 mod tests {
+    use beacon_plugin_sdk::datafusion::common::ScalarValue;
     use beacon_plugin_sdk::datafusion::common::cast::as_float64_array;
+    use beacon_plugin_sdk::datafusion::logical_expr::interval_arithmetic::Interval;
     use beacon_plugin_sdk::datafusion::prelude::{SessionContext, col, lit};
     use beacon_plugin_sdk::scalar_functions::{Implied, hooks_of};
 
-    use super::functions;
+    use super::{add_one, functions};
 
     /// Runs `sql` with the plugin functions and returns the first column as `f64` values.
     async fn run(sql: &str) -> Vec<Option<f64>> {
@@ -161,10 +180,46 @@ mod tests {
     fn in_box_implies_the_box_filter() {
         let udf = functions().into_iter().find(|f| f.name() == "example_in_box").unwrap();
         let args = [col("lon"), col("lat"), lit(2.0), lit(50.0), lit(8.0), lit(56.0)];
-        let implied = hooks_of(&udf).unwrap().implied(&args).unwrap();
+        let ctx = SessionContext::new().task_ctx();
+        let implied = hooks_of(&udf).unwrap().implied(&args, &ctx).unwrap();
         let expected = col("lon")
             .between(lit(2.0), lit(8.0))
             .and(col("lat").between(lit(50.0), lit(56.0)));
         assert!(matches!(implied, Some(Implied::Necessary(e)) if e == expected));
+    }
+
+    /// The closed interval `[low, high]` of `f64` values.
+    fn interval(low: f64, high: f64) -> Interval {
+        Interval::try_new(ScalarValue::Float64(Some(low)), ScalarValue::Float64(Some(high))).unwrap()
+    }
+
+    /// Checks that `actual` holds `[low, high]` and is at most a rounding step wider.
+    fn assert_near(actual: &Interval, low: f64, high: f64) {
+        let (ScalarValue::Float64(Some(a)), ScalarValue::Float64(Some(b))) =
+            (actual.lower(), actual.upper())
+        else {
+            panic!("expected finite Float64 bounds: {actual:?}");
+        };
+        // Interval arithmetic rounds float bounds outward.
+        assert!(*a <= low && low - a < 1e-9 && *b >= high && b - high < 1e-9, "{actual:?}");
+    }
+
+    #[test]
+    fn add_one_bounds_shift_the_input() {
+        let udf = add_one();
+        let bounds = hooks_of(&udf).unwrap().bounds(&[&interval(0.0, 10.0)]).unwrap();
+        assert_near(&bounds.unwrap(), 1.0, 11.0);
+    }
+
+    #[test]
+    fn add_one_propagate_gives_the_input_range() {
+        let udf = add_one();
+        let hooks = hooks_of(&udf).unwrap();
+        // example_add_one(x) BETWEEN 5 AND 9, with x in [0, 100], gives x in [4, 8].
+        let input = hooks.propagate(&interval(5.0, 9.0), &[&interval(0.0, 100.0)]).unwrap();
+        assert_near(&input.unwrap()[0], 4.0, 8.0);
+        // x in [50, 100] cannot give a result in [5, 9].
+        let none = hooks.propagate(&interval(5.0, 9.0), &[&interval(50.0, 100.0)]).unwrap();
+        assert_eq!(none, None);
     }
 }

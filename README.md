@@ -21,7 +21,7 @@ The example plugin `example` has four functions:
 
 | Function | Type | Result |
 | --- | --- | --- |
-| `example_add_one(x)`, alias `example_inc(x)` | Native, closure helper | `x + 1` |
+| `example_add_one(x)`, alias `example_inc(x)` | Native, closure helper with planner hooks | `x + 1` |
 | `example_hypot(x, y)` | Native, `ScalarUDFImpl` | `sqrt(x² + y²)` |
 | `example_in_box(lon, lat, min_lon, min_lat, max_lon, max_lat)` | Native, closure helper with a planner hook | `true` when the point is in the box |
 | `example_add_two(x)` | SQL | `x + 2` |
@@ -73,13 +73,33 @@ A planner hook tells Beacon what a call means. All hooks are optional.
 | `bounds(f)` | The output interval for the argument intervals. |
 | `propagate(f)` | The argument intervals for an output interval. |
 
-`example_in_box` uses `implies`. The filter `example_in_box(lon, lat, 2, 50, 8, 56)` implies
-`lon BETWEEN 2 AND 8 AND lat BETWEEN 50 AND 56`. Beacon uses that predicate to prune files.
+The template has two examples:
+
+- `example_in_box` uses `implies`. The filter `example_in_box(lon, lat, 2, 50, 8, 56)` implies
+  `lon BETWEEN 2 AND 8 AND lat BETWEEN 50 AND 56`. Beacon uses that predicate to prune files.
+- `example_add_one` uses `bounds` and `propagate`. The filter `example_add_one(x) > 10` gives `x > 9`.
+
+Beacon combines the hooks:
+
+- **Nested calls.** In `example_in_box(example_add_one(lon), lat, 3, 50, 9, 56)`, Beacon gets the
+  range `[3, 9]` for the result of `example_add_one`. Then the `propagate` hook gives `lon` in `[2, 8]`.
+  This also works when the two functions come from different plugins.
+- **Arithmetic and casts.** Beacon follows `+` and `-` with a constant, `*` and `/` with a constant
+  for float types, negation and casts. So `example_add_one(x + 1) > 10` gives `x > 8`.
+- **Other conditions in the filter.** A condition such as `x >= 0` in the same filter sets the input
+  interval of `x`. A `propagate` hook gets this interval, so it can relate two columns.
+- **Other plugin functions.** The arguments and the result of `implies` can call any function
+  that Beacon knows, also a function of another plugin. A function from another library is an
+  FFI wrapper. Find it by its name, not with a downcast.
+
+Rules:
 
 - `Implied::Necessary(expr)`: Beacon adds `expr` next to the call. The rule must be correct. Else rows disappear from the result.
-- `Implied::Exact(expr)`: Beacon replaces the call with `expr`.
+- `Implied::Exact(expr)`: Beacon replaces the call with `expr`. Beacon applies these rules inside the arguments before `implies` sees them.
+- `bounds` must hold every value that the function can give. `propagate` must hold every input value that can give the output.
 - A hook that gives `Ok(None)`, an error or a panic gives no answer. The query does not fail.
 - For a `ScalarUDFImpl`, implement `FunctionHooks` and wrap the function with `HookedUdf::new`.
+  `FunctionHooks::implied` gets the session `TaskContext` with all functions that Beacon knows.
 
 The SDK README in the Beacon repository has more detail.
 
