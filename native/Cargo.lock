@@ -360,7 +360,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "beacon-plugin-sdk"
 version = "2.1.0-rc.1"
-source = "git+https://github.com/maris-development/beacon?branch=main#51f7ad45695742a5d10647402ead463662ee355f"
+source = "git+https://github.com/maris-development/beacon?branch=main#82f525e842feb4716db9fed452c72edd5ab5a601"
 dependencies = [
  "datafusion",
  "datafusion-ffi",

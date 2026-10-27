@@ -1,4 +1,4 @@
-//! Example Beacon plugin with three native scalar functions, two of them with planner hooks.
+//! Example Beacon plugin with four native scalar functions, two of them with planner hooks.
 
 use std::sync::Arc;
 
@@ -117,9 +117,49 @@ fn in_box() -> ScalarUDF {
         })
 }
 
+/// `example_round(x, digits)` rounds `x` to `digits` decimals. `digits` must be a constant.
+///
+/// Beacon gives a constant argument as a scalar. So the body computes the factor one time per batch.
+fn round_to() -> ScalarUDF {
+    function("example_round")
+        .args([DataType::Float64, DataType::Int64])
+        .returns(DataType::Float64)
+        .invoke(|args| {
+            let ColumnarValue::Scalar(ScalarValue::Int64(digits)) = &args[1] else {
+                return exec_err!("example_round expects a constant digits argument");
+            };
+            let Some(digits) = digits else {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Float64(None)));
+            };
+            let Ok(digits) = i32::try_from(*digits) else {
+                return exec_err!("example_round expects digits in the i32 range");
+            };
+            let factor = 10f64.powi(digits);
+            let round = |v: f64| (v * factor).round() / factor;
+            match &args[0] {
+                ColumnarValue::Scalar(ScalarValue::Float64(v)) => {
+                    Ok(ColumnarValue::Scalar(ScalarValue::Float64(v.map(round))))
+                }
+                ColumnarValue::Array(array) => {
+                    let result: Float64Array = as_float64_array(array)?
+                        .iter()
+                        .map(|v| v.map(round))
+                        .collect();
+                    Ok(ColumnarValue::Array(Arc::new(result)))
+                }
+                other => exec_err!("example_round expects a Float64 argument, got {other:?}"),
+            }
+        })
+}
+
 /// Returns every native function of the plugin.
 fn functions() -> Vec<ScalarUDF> {
-    vec![add_one(), ScalarUDF::from(Hypot::new()), in_box()]
+    vec![
+        add_one(),
+        ScalarUDF::from(Hypot::new()),
+        in_box(),
+        round_to(),
+    ]
 }
 
 beacon_plugin_sdk::export_plugin!(scalar = functions);
@@ -143,7 +183,12 @@ mod tests {
         let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
         batches
             .iter()
-            .flat_map(|b| as_float64_array(b.column(0)).unwrap().iter().collect::<Vec<_>>())
+            .flat_map(|b| {
+                as_float64_array(b.column(0))
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -154,7 +199,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_one_keeps_null() {
-        assert_eq!(run("SELECT example_inc(CAST(NULL AS DOUBLE))").await, [None]);
+        assert_eq!(
+            run("SELECT example_inc(CAST(NULL AS DOUBLE))").await,
+            [None]
+        );
     }
 
     #[tokio::test]
@@ -176,10 +224,38 @@ mod tests {
         assert_eq!(run(sql).await, [Some(1.0), Some(0.0), None]);
     }
 
+    #[tokio::test]
+    async fn round_rounds_a_column() {
+        let sql = "SELECT example_round(column1, 1) \
+                   FROM (VALUES (1.26), (2.34), (CAST(NULL AS DOUBLE)))";
+        assert_eq!(run(sql).await, [Some(1.3), Some(2.3), None]);
+    }
+
+    #[tokio::test]
+    async fn round_refuses_a_column_for_digits() {
+        let ctx = SessionContext::new();
+        for udf in functions() {
+            ctx.register_udf(udf);
+        }
+        let sql = "SELECT example_round(column1, column2) FROM (VALUES (1.26, 1))";
+        let result = ctx.sql(sql).await.unwrap().collect().await;
+        assert!(result.unwrap_err().to_string().contains("constant digits"));
+    }
+
     #[test]
     fn in_box_implies_the_box_filter() {
-        let udf = functions().into_iter().find(|f| f.name() == "example_in_box").unwrap();
-        let args = [col("lon"), col("lat"), lit(2.0), lit(50.0), lit(8.0), lit(56.0)];
+        let udf = functions()
+            .into_iter()
+            .find(|f| f.name() == "example_in_box")
+            .unwrap();
+        let args = [
+            col("lon"),
+            col("lat"),
+            lit(2.0),
+            lit(50.0),
+            lit(8.0),
+            lit(56.0),
+        ];
         let ctx = SessionContext::new().task_ctx();
         let implied = hooks_of(&udf).unwrap().implied(&args, &ctx).unwrap();
         let expected = col("lon")
@@ -190,7 +266,11 @@ mod tests {
 
     /// The closed interval `[low, high]` of `f64` values.
     fn interval(low: f64, high: f64) -> Interval {
-        Interval::try_new(ScalarValue::Float64(Some(low)), ScalarValue::Float64(Some(high))).unwrap()
+        Interval::try_new(
+            ScalarValue::Float64(Some(low)),
+            ScalarValue::Float64(Some(high)),
+        )
+        .unwrap()
     }
 
     /// Checks that `actual` holds `[low, high]` and is at most a rounding step wider.
@@ -201,13 +281,19 @@ mod tests {
             panic!("expected finite Float64 bounds: {actual:?}");
         };
         // Interval arithmetic rounds float bounds outward.
-        assert!(*a <= low && low - a < 1e-9 && *b >= high && b - high < 1e-9, "{actual:?}");
+        assert!(
+            *a <= low && low - a < 1e-9 && *b >= high && b - high < 1e-9,
+            "{actual:?}"
+        );
     }
 
     #[test]
     fn add_one_bounds_shift_the_input() {
         let udf = add_one();
-        let bounds = hooks_of(&udf).unwrap().bounds(&[&interval(0.0, 10.0)]).unwrap();
+        let bounds = hooks_of(&udf)
+            .unwrap()
+            .bounds(&[&interval(0.0, 10.0)])
+            .unwrap();
         assert_near(&bounds.unwrap(), 1.0, 11.0);
     }
 
@@ -216,10 +302,14 @@ mod tests {
         let udf = add_one();
         let hooks = hooks_of(&udf).unwrap();
         // example_add_one(x) BETWEEN 5 AND 9, with x in [0, 100], gives x in [4, 8].
-        let input = hooks.propagate(&interval(5.0, 9.0), &[&interval(0.0, 100.0)]).unwrap();
+        let input = hooks
+            .propagate(&interval(5.0, 9.0), &[&interval(0.0, 100.0)])
+            .unwrap();
         assert_near(&input.unwrap()[0], 4.0, 8.0);
         // x in [50, 100] cannot give a result in [5, 9].
-        let none = hooks.propagate(&interval(5.0, 9.0), &[&interval(50.0, 100.0)]).unwrap();
+        let none = hooks
+            .propagate(&interval(5.0, 9.0), &[&interval(50.0, 100.0)])
+            .unwrap();
         assert_eq!(none, None);
     }
 }

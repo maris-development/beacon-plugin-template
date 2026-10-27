@@ -17,13 +17,14 @@ Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the ful
 | `scripts/package-plugin.py` | Packs the plugin into an archive and writes `SHA256SUMS`. |
 | `.github/workflows/release.yml` | Builds and packs the plugin for a tag. Attaches the archives to the GitHub release. |
 
-The example plugin `example` has four functions:
+The example plugin `example` has five functions:
 
 | Function | Type | Result |
 | --- | --- | --- |
 | `example_add_one(x)`, alias `example_inc(x)` | Native, closure helper with planner hooks | `x + 1` |
 | `example_hypot(x, y)` | Native, `ScalarUDFImpl` | `sqrt(x² + y²)` |
 | `example_in_box(lon, lat, min_lon, min_lat, max_lon, max_lat)` | Native, closure helper with a planner hook | `true` when the point is in the box |
+| `example_round(x, digits)` | Native, closure helper with a constant argument | `x` rounded to `digits` decimals |
 | `example_add_two(x)` | SQL | `x + 2` |
 
 ## Use the template
@@ -61,6 +62,21 @@ Make `plugin.beacon` in `beacon-plugin.toml` match the Beacon versions of that D
 
 Use the `datafusion` crate that the SDK re-exports. Do not add `datafusion` as a dependency.
 Keep `panic = "unwind"`. This is the default. The SDK refuses `panic = "abort"`.
+
+## Read the arguments
+
+The SDK has two builder methods for the function body:
+
+| Builder method | Arguments |
+| --- | --- |
+| `invoke_arrays(f)` | Arrays only. Each constant argument becomes an array with one value per row. |
+| `invoke(f)` | One `ColumnarValue` per argument. A constant argument, such as `2` in `f(x, 2)`, is a `ColumnarValue::Scalar`. |
+
+Use `invoke` to require a constant argument, or to prepare a constant one time per batch.
+`example_round` refuses a column for `digits`. It computes the factor `10^digits` one time per batch.
+
+The body of `invoke` and of a `ScalarUDFImpl` must accept a scalar for each argument.
+`example_hypot` calls `to_array` to change each argument to an array.
 
 ## Add planner hooks
 
