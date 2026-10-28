@@ -15,7 +15,7 @@ Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the ful
 | `native/Cargo.lock` | The lock file. The package script reads the DataFusion version from it. |
 | `sql/functions.sql` | `CREATE FUNCTION` statements. They can call the native functions. |
 | `scripts/package-plugin.py` | Packs the plugin into an archive and writes `SHA256SUMS`. |
-| `.github/workflows/release.yml` | Builds and packs the plugin for a tag. Attaches the archives to the GitHub release. |
+| `.github/workflows/release.yml` | Builds and packs the plugin for a tag, for Linux, macOS and Windows. Attaches the archives to the GitHub release. |
 
 The example plugin `example` has five functions:
 
@@ -129,8 +129,8 @@ cargo test --manifest-path native/Cargo.toml
 
 ## Pack the plugin
 
-Do these steps on Linux. The Beacon server image is a Linux image, so the library must be a Linux `.so` file.
-On Windows, use WSL.
+Build the library on the platform of the Beacon server.
+The Beacon server image is a Linux image. For that image, build on Linux or in WSL.
 
 1. Build the library:
 
@@ -143,6 +143,16 @@ On Windows, use WSL.
    ```bash
    python3 scripts/package-plugin.py . --out dist --library native/target/release/libexample_native.so --target x86_64-unknown-linux-gnu
    ```
+
+Use the library file and the target of your platform:
+
+| Platform | Library file | Target |
+| --- | --- | --- |
+| Linux | `libexample_native.so` | `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` |
+| macOS | `libexample_native.dylib` | `aarch64-apple-darwin` or `x86_64-apple-darwin` |
+| Windows | `example_native.dll` | `x86_64-pc-windows-msvc` |
+
+Beacon loads only the library file of its own platform. It picks the archive with its own target.
 
 | Plugin type | Archive name |
 | --- | --- |
@@ -170,7 +180,17 @@ INSTALL example FROM 'file:///plugins/example-0.1.0-df54-x86_64-unknown-linux-gn
    ```
 
 The workflow `release.yml` stops if the tag does not match `plugin.version`.
-It builds the library for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
+It builds the library for Linux, macOS and Windows:
+
+| Runner | Target |
+| --- | --- |
+| `ubuntu-24.04` | `x86_64-unknown-linux-gnu` |
+| `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
+| `macos-15` | `aarch64-apple-darwin` |
+| `macos-15-intel` | `x86_64-apple-darwin` |
+| `windows-2025` | `x86_64-pc-windows-msvc` |
+
+Remove a row from the matrix in `release.yml` to skip a target.
 Then it attaches the archives and one `SHA256SUMS` file to the release `v0.1.0`.
 The workflow runs no tests. Run the unit tests before you push the tag.
 

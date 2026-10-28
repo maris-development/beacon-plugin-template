@@ -16,24 +16,48 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            python: python3
+            library: lib{0}.so
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            python: python3
+            library: lib{0}.so
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            python: python3
+            library: lib{0}.dylib
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            python: python3
+            library: lib{0}.dylib
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            python: python
+            library: "{0}.dll"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
       - name: Read the manifest
+        env:
+          LIBRARY_PATTERN: ${{ matrix.library }}
         run: |
-          python3 - <<'EOF' >> "$GITHUB_ENV"
+          ${{ matrix.python }} - <<'EOF'
           import os, sys, tomllib
           m = tomllib.load(open("beacon-plugin.toml", "rb"))
           version = m["plugin"]["version"]
           if os.environ["GITHUB_REF_NAME"] != f"v{version}":
               sys.exit(f"tag {os.environ['GITHUB_REF_NAME']} does not match plugin.version {version}")
           native = m.get("native")
-          print(f"PLUGIN_NATIVE={'true' if native else 'false'}")
+          lines = [f"PLUGIN_NATIVE={'true' if native else 'false'}"]
           if native:
-              print(f"PLUGIN_CRATE={native['crate']}")
-              print(f"PLUGIN_LIBRARY={native['library']}")
+              lines.append(f"PLUGIN_CRATE={native['crate']}")
+              lines.append(f"PLUGIN_FILE={os.environ['LIBRARY_PATTERN'].format(native['library'])}")
+          # Write LF line ends, also on Windows.
+          with open(os.environ["GITHUB_ENV"], "a", newline="\n") as env:
+              env.write("\n".join(lines) + "\n")
           EOF
 
       - name: Update Rust
@@ -56,9 +80,9 @@ jobs:
         run: |
           args=(--out dist)
           if [ "$PLUGIN_NATIVE" = "true" ]; then
-            args+=(--library "$PLUGIN_CRATE/target/release/lib$PLUGIN_LIBRARY.so" --target "$TARGET")
+            args+=(--library "$PLUGIN_CRATE/target/release/$PLUGIN_FILE" --target "$TARGET")
           fi
-          python3 scripts/package-plugin.py . "${args[@]}"
+          ${{ matrix.python }} scripts/package-plugin.py . "${args[@]}"
 
       - name: Keep the archive
         uses: actions/upload-artifact@v4
