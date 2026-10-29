@@ -158,7 +158,9 @@ impl FormatReader for TsvReader {
         Ok(Arc::new(Schema::new(fields)))
     }
 
-    /// The row count lets Beacon answer `count(*)` without a scan.
+    /// The row count. The columns of `table_schema` get unknown statistics.
+    ///
+    /// Beacon does not call this method yet.
     async fn infer_stats(
         &self,
         store: Arc<dyn ObjectStore>,

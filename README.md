@@ -4,6 +4,8 @@ A template for a [Beacon](https://github.com/maris-development/beacon) plugin.
 A plugin adds scalar SQL functions and file formats to Beacon.
 This template holds a native Rust crate, a SQL function, a package script and a release workflow.
 
+The [template wiki](https://github.com/maris-development/beacon-plugin-template/wiki) is the full guide: functions, planner hooks, file formats, testing, releases, installs and troubleshooting.
+
 The Beacon repository has the full rules:
 
 - [SDK README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin-sdk/README.md): functions, planner hooks, file formats and object stores.
@@ -177,7 +179,7 @@ Rules for format code:
 - Do not call `tokio::spawn`, `tokio::time` or `Handle::current()`. The plugin has no tokio runtime.
 - Keep each poll short. CPU work in a poll blocks one Beacon worker thread.
 - `OutputKind::Flat` gives normal Arrow columns. For gridded data, use `OutputKind::Nd` and `beacon_plugin_sdk::nd`.
-- For `COPY ... TO`, implement `write` and return `true` from `can_write`. The example cannot write.
+- Beacon does not call `infer_stats` or `write` yet. So statistics and `COPY ... TO` do not work for a plugin format. The example implements `infer_stats` for a later Beacon version.
 
 The unit tests in `tsv.rs` call the reader with an `InMemory` store.
 
