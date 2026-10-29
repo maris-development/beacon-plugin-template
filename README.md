@@ -1,17 +1,21 @@
 # beacon-plugin-template
 
-A template for a [Beacon](https://github.com/maris-development/beacon) function plugin.
+A template for a [Beacon](https://github.com/maris-development/beacon) plugin.
 A plugin adds scalar SQL functions and file formats to Beacon.
 This template holds a native Rust crate, a SQL function, a package script and a release workflow.
 
-Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the full rules.
+The Beacon repository has the full rules:
+
+- [SDK README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin-sdk/README.md): functions, planner hooks, file formats and object stores.
+- [Registry README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin-registry/README.md): the manifest, the archives and the install sources.
 
 ## Contents
 
 | Path | Contents |
 | --- | --- |
 | `beacon-plugin.toml` | The plugin manifest: name, version, supported Beacon versions and files. |
-| `native/` | A Rust `cdylib` crate on `beacon-plugin-sdk`. It holds the native functions and unit tests. |
+| `native/` | A Rust `cdylib` crate on `beacon-plugin-sdk`. It holds the native functions, the file format and the unit tests. |
+| `native/src/lib.rs` | The native functions, their unit tests and the export macro. |
 | `native/src/tsv.rs` | The file format `example_tsv` and its unit tests. |
 | `native/testdata/stations.etsv` | A sample file for `example_tsv`. |
 | `native/Cargo.lock` | The lock file. The package script reads the DataFusion version from it. |
@@ -37,6 +41,8 @@ It also has one file format, `example_tsv`. See [Add a file format](#add-a-file-
 2. Clone the new repository.
 3. Rename the plugin. Change the names in the table below.
 4. Write your functions in `native/src/lib.rs` and `sql/functions.sql`.
+5. Write your file formats in `native/src/tsv.rs`, or in a new module.
+6. Remove the examples that you do not need.
 
 | File | Change |
 | --- | --- |
@@ -47,7 +53,15 @@ It also has one file format, `example_tsv`. See [Add a file format](#add-a-file-
 | `sql/functions.sql` | The function names. |
 
 The plugin name has lowercase letters, digits and `_` only. It starts with a letter.
-A SQL-only plugin needs no Rust code. Remove `[native]` from the manifest and remove `native/`.
+
+A plugin needs only the parts that it uses:
+
+| Plugin has | Change |
+| --- | --- |
+| No file format | Remove `native/src/tsv.rs`, `native/testdata/` and `mod tsv;`. Use `export_plugin!(scalar = functions)`. |
+| No native function | Keep the formats. Use `export_plugin!(formats = tsv::formats)`. |
+| No SQL function | Remove `[sql]` from the manifest and remove `sql/`. |
+| SQL functions only | Remove `[native]` from the manifest and remove `native/`. |
 
 ## Choose the Beacon version
 
@@ -122,7 +136,7 @@ Rules:
 - For a `ScalarUDFImpl`, implement `FunctionHooks` and wrap the function with `HookedUdf::new`.
   `FunctionHooks::implied` gets the session `TaskContext` with all functions that Beacon knows.
 
-The SDK README in the Beacon repository has more detail.
+The [SDK README](https://github.com/maris-development/beacon/blob/main/beacon-db/beacon-plugin-sdk/README.md) has more detail.
 
 ## Add a file format
 
@@ -165,7 +179,7 @@ Rules for format code:
 - `OutputKind::Flat` gives normal Arrow columns. For gridded data, use `OutputKind::Nd` and `beacon_plugin_sdk::nd`.
 - For `COPY ... TO`, implement `write` and return `true` from `can_write`. The example cannot write.
 
-The unit tests in `tsv.rs` call the reader with an `InMemory` store. They need no Beacon server.
+The unit tests in `tsv.rs` call the reader with an `InMemory` store.
 
 ## Run the unit tests
 
@@ -213,6 +227,12 @@ To try the archive, mount `dist/` into a Beacon container as `/plugins`. Then ru
 INSTALL example FROM 'file:///plugins/example-0.1.0-df54-x86_64-unknown-linux-gnu.tar.gz'
 ```
 
+To try the file format, put `native/testdata/stations.etsv` in the Beacon data folder. Then run:
+
+```sql
+SELECT * FROM read_example_tsv(['stations.etsv'], {null_value: '-'})
+```
+
 ## Release the plugin
 
 1. Set `plugin.version` in `beacon-plugin.toml`.
@@ -228,7 +248,7 @@ INSTALL example FROM 'file:///plugins/example-0.1.0-df54-x86_64-unknown-linux-gn
    ```
 
 The workflow `release.yml` stops if the tag does not match `plugin.version`.
-It builds the library for Linux, macOS and Windows:
+It builds the library for these targets:
 
 | Runner | Target |
 | --- | --- |
@@ -238,8 +258,8 @@ It builds the library for Linux, macOS and Windows:
 | `macos-15-intel` | `x86_64-apple-darwin` |
 | `windows-2025` | `x86_64-pc-windows-msvc` |
 
-Remove a row from the matrix in `release.yml` to skip a target.
 Then it attaches the archives and one `SHA256SUMS` file to the release `v0.1.0`.
+To skip a target, remove its row from the matrix in `release.yml`.
 The workflow runs no tests. Run the unit tests before you push the tag.
 
 ## Install the plugin
@@ -259,13 +279,16 @@ To install the plugin at server start, set `BEACON_PLUGINS`:
 BEACON_PLUGINS=example=github:<owner>/<repo>@v0.1.0
 ```
 
-`beacon.system.plugins` shows the installed plugins. `UNINSTALL example` removes the plugin.
+After the install, the functions, `read_example_tsv`, `read_example_tsv_schema` and `STORED AS example_tsv` are available.
+`beacon.system.plugins` shows the installed plugins.
+
+`UNINSTALL example` removes the plugin. A table on `example_tsv` then gives an error until you install the plugin again.
 
 ## Rules for native code
 
 - A fault in native code stops the Beacon server. Test the plugin well.
-- A panic in a function becomes a query error.
-- Do not panic in `name`, `aliases`, `signature` or `Drop`.
+- A panic in a function or in a format call becomes a query error.
+- Do not panic in getters, such as `name`, `aliases`, `signature` and `extensions`. Do not panic in `Drop`.
 
 ## License
 
