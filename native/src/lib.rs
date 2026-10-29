@@ -1,4 +1,7 @@
-//! Example Beacon plugin with four native scalar functions, two of them with planner hooks.
+//! Example Beacon plugin with four native scalar functions, two of them with planner hooks,
+//! and one file format.
+
+mod tsv;
 
 use std::sync::Arc;
 
@@ -162,7 +165,7 @@ fn functions() -> Vec<ScalarUDF> {
     ]
 }
 
-beacon_plugin_sdk::export_plugin!(scalar = functions);
+beacon_plugin_sdk::export_plugin!(scalar = functions, formats = tsv::formats);
 
 #[cfg(test)]
 mod tests {

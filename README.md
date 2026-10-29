@@ -1,7 +1,7 @@
 # beacon-plugin-template
 
 A template for a [Beacon](https://github.com/maris-development/beacon) function plugin.
-A plugin adds scalar SQL functions to Beacon.
+A plugin adds scalar SQL functions and file formats to Beacon.
 This template holds a native Rust crate, a SQL function, a package script and a release workflow.
 
 Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the full rules.
@@ -12,6 +12,8 @@ Read the Beacon guide `docs/docs/2.1.0-rc1/guides/write-a-plugin.md` for the ful
 | --- | --- |
 | `beacon-plugin.toml` | The plugin manifest: name, version, supported Beacon versions and files. |
 | `native/` | A Rust `cdylib` crate on `beacon-plugin-sdk`. It holds the native functions and unit tests. |
+| `native/src/tsv.rs` | The file format `example_tsv` and its unit tests. |
+| `native/testdata/stations.etsv` | A sample file for `example_tsv`. |
 | `native/Cargo.lock` | The lock file. The package script reads the DataFusion version from it. |
 | `sql/functions.sql` | `CREATE FUNCTION` statements. They can call the native functions. |
 | `scripts/package-plugin.py` | Packs the plugin into an archive and writes `SHA256SUMS`. |
@@ -27,6 +29,8 @@ The example plugin `example` has five functions:
 | `example_round(x, digits)` | Native, closure helper with a constant argument | `x` rounded to `digits` decimals |
 | `example_add_two(x)` | SQL | `x + 2` |
 
+It also has one file format, `example_tsv`. See [Add a file format](#add-a-file-format).
+
 ## Use the template
 
 1. Click **Use this template** on GitHub. Make a new repository.
@@ -39,6 +43,7 @@ The example plugin `example` has five functions:
 | `beacon-plugin.toml` | `plugin.name`, `plugin.version` and `native.library`. |
 | `native/Cargo.toml` | `package.name` and `lib.name`. `lib.name` must equal `native.library`. |
 | `native/src/lib.rs` | The function names. Start each name with the plugin name. |
+| `native/src/tsv.rs` | The format name and the extensions. Start the format name with the plugin name. |
 | `sql/functions.sql` | The function names. |
 
 The plugin name has lowercase letters, digits and `_` only. It starts with a letter.
@@ -119,9 +124,52 @@ Rules:
 
 The SDK README in the Beacon repository has more detail.
 
+## Add a file format
+
+A file format lets Beacon read a new type of file.
+The example `example_tsv` reads tab-separated text files with the extension `.etsv`.
+The first line holds the column names. The reader infers the type of each column: `Int64`, `Float64` or `Utf8`.
+
+Beacon adds these SQL objects for the format:
+
+```sql
+SELECT * FROM read_example_tsv(['stations.etsv'], {null_value: '-'});
+SELECT * FROM read_example_tsv_schema(['stations.etsv']);
+CREATE EXTERNAL TABLE stations STORED AS example_tsv LOCATION 'tsv/' OPTIONS ('null_value' '-');
+```
+
+Implement two traits from `beacon_plugin_sdk::file_format`:
+
+| Trait | Methods | Use |
+| --- | --- | --- |
+| `FormatFactory` | `name`, `extensions`, `output_kind`, `table_function_args`, `create` | Describes the format. `create` gets the table options and returns a `FormatReader`. |
+| `FormatReader` | `infer_schema`, `infer_stats`, `open`, `write` | Reads or writes one file in each call. |
+
+Then add the factories to the export macro:
+
+```rust
+beacon_plugin_sdk::export_plugin!(scalar = functions, formats = tsv::formats);
+```
+
+Beacon does the work for many files. It lists the files and merges their schemas.
+It casts each column to the table type, fills a missing column with nulls and adds the partition columns.
+It also applies the filters again. So `open` can ignore `ScanRequest::filters` and `ScanRequest::limit`.
+
+Rules for format code:
+
+- The format name and each extension must be free in Beacon. The CSV format of Beacon has the extension `tsv`, so the example uses `etsv`.
+- `table_function_args` sets the fields of the options struct of `read_<name>`. Beacon gives each value to `create` as a string.
+- Do all I/O through the `ObjectStore` that Beacon gives. Then the format works on local disk and on S3.
+- Do not call `tokio::spawn`, `tokio::time` or `Handle::current()`. The plugin has no tokio runtime.
+- Keep each poll short. CPU work in a poll blocks one Beacon worker thread.
+- `OutputKind::Flat` gives normal Arrow columns. For gridded data, use `OutputKind::Nd` and `beacon_plugin_sdk::nd`.
+- For `COPY ... TO`, implement `write` and return `true` from `can_write`. The example cannot write.
+
+The unit tests in `tsv.rs` call the reader with an `InMemory` store. They need no Beacon server.
+
 ## Run the unit tests
 
-The unit tests run the native functions in DataFusion. They need no Beacon server.
+The unit tests run the native functions in DataFusion and the file format on an in-memory store. They need no Beacon server.
 
 ```bash
 cargo test --manifest-path native/Cargo.toml
