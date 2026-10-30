@@ -2,6 +2,7 @@
 //!
 //! The first line holds the column names. Each next line holds one row.
 //! The reader infers the type of each column: `Int64`, `Float64` or `Utf8`.
+//! The writer gives `COPY ... TO ... STORED AS example_tsv` the same layout.
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -9,20 +10,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use beacon_plugin_sdk::datafusion::arrow::array::{
-    ArrayRef, RecordBatch, RecordBatchOptions, StringArray,
+    Array, ArrayRef, RecordBatch, RecordBatchOptions, StringArray,
 };
 use beacon_plugin_sdk::datafusion::arrow::compute::cast;
 use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use beacon_plugin_sdk::datafusion::arrow::util::display::array_value_to_string;
 use beacon_plugin_sdk::datafusion::common::stats::Precision;
 use beacon_plugin_sdk::datafusion::common::{Statistics, exec_err};
 use beacon_plugin_sdk::datafusion::error::{DataFusionError, Result};
 use beacon_plugin_sdk::datafusion::execution::SendableRecordBatchStream;
 use beacon_plugin_sdk::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use beacon_plugin_sdk::file_format::{
-    ArgKind, ArgSpec, FormatFactory, FormatReader, OutputKind, ScanRequest,
+    ArgKind, ArgSpec, FormatFactory, FormatReader, OutputKind, ScanRequest, WriteRequest,
 };
 use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStore, ObjectStoreExt};
-use futures::stream;
+use futures::{StreamExt, stream};
 
 /// The option key for the text that means a null value. The default is the empty text.
 const NULL_VALUE: &str = "null_value";
@@ -39,12 +41,20 @@ impl FormatFactory for TsvFormat {
     }
 
     fn extensions(&self) -> Vec<String> {
-        // The CSV format of Beacon has the key `tsv`. Each key must be free.
-        vec!["etsv".to_string()]
+        // `STORED AS` uses only the name, so the CSV format of Beacon can also read `.tsv`.
+        vec!["tsv".to_string()]
     }
 
     fn output_kind(&self) -> OutputKind {
         OutputKind::Flat
+    }
+
+    fn can_write(&self) -> bool {
+        true
+    }
+
+    fn content_type(&self) -> &str {
+        "text/tab-separated-values"
     }
 
     /// `read_example_tsv(paths, {null_value: '-'})` sets the `null_value` option.
@@ -206,6 +216,52 @@ impl FormatReader for TsvReader {
             stream::iter(batches),
         )))
     }
+
+    /// Writes one output file: the column names, then one line per row.
+    ///
+    /// Beacon calls this method one time for each output file of a `COPY`.
+    async fn write(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        request: WriteRequest,
+        mut input: SendableRecordBatchStream,
+    ) -> Result<u64> {
+        let names: Vec<&str> = request
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        let mut text = names.join("\t") + "\n";
+        let mut rows = 0;
+        while let Some(batch) = input.next().await {
+            let batch = batch?;
+            for row in 0..batch.num_rows() {
+                let mut values = Vec::with_capacity(batch.num_columns());
+                for column in batch.columns() {
+                    let value = if column.is_null(row) {
+                        self.null_value.clone()
+                    } else {
+                        array_value_to_string(column, row)?
+                    };
+                    // A tab or a line end in a value breaks the layout of the file.
+                    if value.contains(['\t', '\n', '\r']) {
+                        return exec_err!("{}: a value holds a tab or a line end", request.path);
+                    }
+                    values.push(value);
+                }
+                text.push_str(&values.join("\t"));
+                text.push('\n');
+            }
+            rows += batch.num_rows() as u64;
+        }
+        // One `put` for the whole file. Use a multipart upload for a large file.
+        store
+            .put(&request.path, text.into_bytes().into())
+            .await
+            .map_err(external)?;
+        Ok(rows)
+    }
 }
 
 /// Returns every file format of the plugin.
@@ -217,23 +273,27 @@ pub fn formats() -> Vec<Arc<dyn FormatFactory>> {
 mod tests {
     use std::sync::Arc;
 
-    use beacon_plugin_sdk::datafusion::arrow::array::{Array, Int64Array, StringArray};
+    use beacon_plugin_sdk::datafusion::arrow::array::{
+        Array, ArrayRef, Int64Array, RecordBatch, StringArray,
+    };
     use beacon_plugin_sdk::datafusion::arrow::datatypes::{DataType, Field, Schema};
     use beacon_plugin_sdk::datafusion::common::stats::Precision;
-    use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, ScanRequest};
+    use beacon_plugin_sdk::datafusion::execution::SendableRecordBatchStream;
+    use beacon_plugin_sdk::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+    use beacon_plugin_sdk::file_format::{FormatFactory, FormatReader, ScanRequest, WriteRequest};
     use beacon_plugin_sdk::object_store::store::memory::InMemory;
     use beacon_plugin_sdk::object_store::store::path::Path;
     use beacon_plugin_sdk::object_store::store::{ObjectMeta, ObjectStore, ObjectStoreExt};
-    use futures::TryStreamExt;
+    use futures::{TryStreamExt, stream};
 
     use super::{NULL_VALUE, TsvFormat, TsvReader};
 
-    const STATIONS: &str = include_str!("../testdata/stations.etsv");
+    const STATIONS: &str = include_str!("../testdata/stations.tsv");
 
     /// Puts the sample file in an in-memory store.
     async fn stored() -> (Arc<dyn ObjectStore>, ObjectMeta) {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("stations.etsv");
+        let path = Path::from("stations.tsv");
         store
             .put(&path, STATIONS.as_bytes().to_vec().into())
             .await
@@ -337,12 +397,60 @@ mod tests {
         assert_eq!(station[2].as_deref(), Some("Wadden"));
     }
 
+    /// Writes `station` and `depth` to `out.tsv` and returns the row count and the file text.
+    async fn write(station: Vec<&str>, depth: Vec<Option<i64>>) -> (Result<u64, String>, String) {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("station", DataType::Utf8, true),
+            Field::new("depth", DataType::Int64, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(station)),
+            Arc::new(Int64Array::from(depth)),
+        ];
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+        let input: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&schema),
+            stream::iter(vec![Ok(batch)]),
+        ));
+        let path = Path::from("out.tsv");
+        let request = WriteRequest {
+            path: path.clone(),
+            schema,
+            local_path: None,
+        };
+        let rows = reader(Some("-"))
+            .write(Arc::clone(&store), request, input)
+            .await
+            .map_err(|e| e.to_string());
+        let text = match store.get(&path).await {
+            Ok(result) => String::from_utf8(result.bytes().await.unwrap().to_vec()).unwrap(),
+            Err(_) => String::new(),
+        };
+        (rows, text)
+    }
+
+    #[tokio::test]
+    async fn write_gives_the_header_and_the_rows() {
+        let (rows, text) = write(vec!["A", "B"], vec![Some(40), None]).await;
+        assert_eq!(rows, Ok(2));
+        assert_eq!(text, "station\tdepth\nA\t40\nB\t-\n");
+    }
+
+    #[tokio::test]
+    async fn write_refuses_a_tab_in_a_value() {
+        let (rows, text) = write(vec!["A\tB"], vec![Some(1)]).await;
+        assert!(rows.unwrap_err().contains("holds a tab"));
+        // The writer writes nothing on an error.
+        assert_eq!(text, "");
+    }
+
     #[test]
     fn a_short_row_is_an_error() {
         let reader = TsvReader {
             null_value: String::new(),
         };
-        let Err(error) = reader.parse("a\tb\n1\n", "short.etsv") else {
+        let Err(error) = reader.parse("a\tb\n1\n", "short.tsv") else {
             panic!("expected an error");
         };
         assert!(error.to_string().contains("line 2 has 1 values"), "{error}");

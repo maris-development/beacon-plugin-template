@@ -1,6 +1,7 @@
 //! Example Beacon plugin with four native scalar functions, two of them with planner hooks,
-//! and one file format.
+//! one file format and one table type.
 
+mod memory;
 mod tsv;
 
 use std::sync::Arc;
@@ -165,7 +166,11 @@ fn functions() -> Vec<ScalarUDF> {
     ]
 }
 
-beacon_plugin_sdk::export_plugin!(scalar = functions, formats = tsv::formats);
+beacon_plugin_sdk::export_plugin!(
+    scalar = functions,
+    formats = tsv::formats,
+    tables = memory::tables
+);
 
 #[cfg(test)]
 mod tests {
