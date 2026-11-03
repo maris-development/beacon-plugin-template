@@ -359,8 +359,8 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-nd-encoding"
-version = "2.1.0-rc.1"
-source = "git+https://github.com/maris-development/beacon?branch=main#82839b2b0a37dbca87165f4c526fa63490c7c46f"
+version = "2.1.0-rc.2"
+source = "git+https://github.com/maris-development/beacon?tag=v2.1.0-rc2#b8012ad7f1b4ffc82549c3969a3000d9ac55f15c"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -368,8 +368,8 @@ dependencies = [
 
 [[package]]
 name = "beacon-plugin-sdk"
-version = "2.1.0-rc.1"
-source = "git+https://github.com/maris-development/beacon?branch=main#82839b2b0a37dbca87165f4c526fa63490c7c46f"
+version = "2.1.0-rc.2"
+source = "git+https://github.com/maris-development/beacon?tag=v2.1.0-rc2#b8012ad7f1b4ffc82549c3969a3000d9ac55f15c"
 dependencies = [
  "async-ffi",
  "async-trait",
